@@ -1,10 +1,12 @@
 extern crate rand;
 
 use rand::prelude::*;
+use std::sync::{Mutex, Arc};
 
 use super::super::super::core::FrameBuffer;
 use super::font::*;
 use super::opcode::*;
+use super::keyboard::*;
 
 // General constants
 pub const PROGRAM_ENTRY: u16 = 0x200;
@@ -39,34 +41,25 @@ pub struct CPU {
     pub i: u16,
     pub timers: [u8; 2],
     // Internal memory
-    pub frame_buf: FrameBuffer<u8>,
+    pub frame_buf: Arc<Mutex<FrameBuffer<u8>>>,
     pub memory: [u8; 0xFFFF],
     pub stack: [u16; 64],
     // User input
-    pub keyboard: [bool; 16],
-    // Emulator specific
-    pub draw_flag: bool,
-    pub wait_for_key: bool,
-    pub key_received: bool,
-    pub key: u8,
+    pub keyboard: Arc<Mutex<Keyboard>>,
 }
 
 impl CPU {
-    pub fn new() -> Self {
+    pub fn new(frame_buf: Arc<Mutex<FrameBuffer<u8>>>, keyboard: Arc<Mutex<Keyboard>>) -> Self {
         Self {
             regs: [0; 16],
             sp: 0,
             pc: PROGRAM_ENTRY,
             i: 0,
             timers: [0; 2],
-            frame_buf: FrameBuffer::new(64, 32, 0u8),
+            frame_buf,
             memory: [0; 0xFFFF],
             stack: [0; 64],
-            keyboard: [false; 16],
-            draw_flag: false,
-            wait_for_key: false,
-            key_received: false,
-            key: 0,
+            keyboard,
         }
     }
 
@@ -99,7 +92,7 @@ impl CPU {
         let vy = opcode.y() as usize;
         let nn = opcode.nn() as u8;
 
-        println!("({:04X}) Executing opcode: {:04X}", self.pc, opcode.value);
+        //println!("({:04X}) Executing opcode: {:04X}", self.pc, opcode.value);
 
         let mut rng = rand::thread_rng();
 
@@ -107,7 +100,7 @@ impl CPU {
             0x0 => match opcode.nn() {
                 0xE0 => {
                     // Clear display
-                    self.frame_buf.clear(0);
+                    self.frame_buf.lock().unwrap().clear(0);
                     self.pc += 2;
                 }
                 0xEE => {
@@ -256,14 +249,13 @@ impl CPU {
             0xD => {
                 // Draw sprite
                 let flipped = self.draw_sprite(self.regs[vx], self.regs[vy], opcode.last() as u8);
-                self.draw_flag = true;
                 self.regs[VF] = flipped as u8;
                 self.pc += 2;
             }
             0xE => match opcode.nn() {
                 0x9E => {
                     // Skip next instruction if key[VX] is pressed
-                    if self.keyboard[self.regs[vx] as usize] {
+                    if self.keyboard.lock().unwrap().state[self.regs[vx] as usize] {
                         self.pc += 4;
                     } else {
                         self.pc += 2;
@@ -271,7 +263,7 @@ impl CPU {
                 }
                 0xA1 => {
                     // Skip next instruction if key[VX] is not pressed
-                    if !self.keyboard[self.regs[vx] as usize] {
+                    if !self.keyboard.lock().unwrap().state[self.regs[vx] as usize] {
                         self.pc += 4;
                     } else {
                         self.pc += 2;
@@ -287,14 +279,16 @@ impl CPU {
                 }
                 0x0A => {
                     // Wait for keypress
-                    if self.wait_for_key && self.key_received {
-                        self.wait_for_key = false;
-                        self.key_received = false;
 
-                        self.regs[vx] = self.key;
+                    let mut kb = self.keyboard.lock().unwrap();
+                    if kb.wait_for_key && kb.key_received {
+                        kb.wait_for_key = false;
+                        kb.key_received = false;
+
+                        self.regs[vx] = kb.key;
                         self.pc += 2;
                     } else {
-                        self.wait_for_key = true;
+                        kb.wait_for_key = true;
                     }
                 }
                 0x15 => {
@@ -381,22 +375,10 @@ impl CPU {
         }
     }
 
-    pub fn press_key(&mut self, key: u8) {
-        self.keyboard[key as usize] = true;
-
-        if self.wait_for_key {
-            self.key_received = true;
-            self.key = key;
-        }
-    }
-
-    pub fn release_key(&mut self, key: u8) {
-        self.keyboard[key as usize] = false;
-    }
-
     fn draw_sprite(&mut self, x: u8, y: u8, height: u8) -> bool {
         let buf = [0u8; 8];
         let mut ret = false;
+        let mut frame_buf = self.frame_buf.lock().unwrap();
 
         for i in 0..height {
             // u8 line containing 8 pixels bit encoded
@@ -419,15 +401,17 @@ impl CPU {
                 };
 
                 if pixel == 0xFF {
-                    if self.frame_buf.read(c_x, c_y) == 0x00 {
-                        self.frame_buf.write(c_x, c_y, 0xFF);
+                    if frame_buf.read(c_x, c_y) == 0x00 {
+                        frame_buf.write(c_x, c_y, 0xFF);
                         ret = true;
                     } else {
-                        self.frame_buf.write(c_x, c_y, 0x00);
+                        frame_buf.write(c_x, c_y, 0x00);
                     }
                 }
             }
         }
+
+        frame_buf.request_draw();
 
         ret
     }

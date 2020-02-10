@@ -1,11 +1,9 @@
 mod cpu;
-mod epx;
 mod font;
-mod gpu;
 mod opcode;
+mod keyboard;
 
 pub use cpu::*;
-pub use epx::*;
 pub use font::*;
-pub use gpu::*;
+pub use keyboard::*;
 pub use opcode::*;
