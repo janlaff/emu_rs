@@ -72,5 +72,7 @@ impl<T: Clone + Copy + Eq + PartialEq> GPU<T> for EpxGPU {
                 }
             }
         }
+
+        output.request_draw();
     }
 }

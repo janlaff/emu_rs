@@ -1,20 +1,17 @@
-use std::sync::mpsc::Sender;
-use std::sync::{Condvar, Mutex, Arc};
-
 pub struct FrameBuffer<T> {
     buf: Vec<T>,
     width: u32,
     height: u32,
-    output: Sender<()>,
+    completed: bool,
 }
 
 impl<T: Copy + Clone + Eq + PartialEq> FrameBuffer<T> {
-    pub fn new(width: u32, height: u32, init: T, output: Sender<()>) -> Self {
+    pub fn new(width: u32, height: u32, init: T) -> Self {
         Self {
             buf: vec![init; (width * height) as usize],
             width,
             height,
-            output
+            completed: false,
         }
     }
 
@@ -35,7 +32,15 @@ impl<T: Copy + Clone + Eq + PartialEq> FrameBuffer<T> {
     }
 
     pub fn write(&mut self, x: u32, y: u32, val: T) {
-        self.buf[(y * self.width + x) as usize] = val;
+        if self.completed {
+            eprintln!("Warning: Writing to framebuffer that hasn't been handled yet");
+        }
+
+        if x >= 0 && x < self.width && y >= 0 && y < self.height {
+            self.buf[(y * self.width + x) as usize] = val;
+        } else {
+            println!("Ignoring pixel out of bounds");
+        }
     }
 
     pub fn clear(&mut self, init: T) {
@@ -43,6 +48,15 @@ impl<T: Copy + Clone + Eq + PartialEq> FrameBuffer<T> {
     }
 
     pub fn request_draw(&mut self) {
-        self.output.send(()).unwrap();
+        self.completed = true;
+    }
+
+    pub fn handle_draw(&mut self) -> bool {
+        if self.completed {
+            self.completed = false;
+            true
+        } else {
+            false
+        }
     }
 }

@@ -30,19 +30,23 @@ fn main() {
 
     let mut threads = vec![];
 
-    let (internal_tx, internal_rx) = channel();
+    let (cpu_tx, cpu_rx) = channel();
     let (epx_tx, epx_rx) = channel();
 
-    let cpu_buf = Arc::new(Mutex::new(FrameBuffer::new(64, 32, 0u8, internal_tx.clone())));
-    let epx_buf = Arc::new(Mutex::new(FrameBuffer::new(128, 64, 0u8, epx_tx.clone())));
+    let frame_buf_ctx = emu::core::FrameBufferContext::new(vec![
+        FrameBuffer::new(64, 32, 0u8),
+        FrameBuffer::new(128, 64, 0u8),
+    ]);
+
     let gpu = Arc::new(Mutex::new(emu::core::EpxGPU::new()));
 
     let keyboard = Arc::new(Mutex::new(Keyboard::new()));
 
-    let mut cpu = emu::arch::chip8::CPU::new(cpu_buf.clone(), keyboard.clone());
+    let mut cpu = emu::arch::chip8::CPU::new(frame_buf_ctx.get_buffer(0), keyboard.clone());
     cpu.load_program(&rom[..]);
 
-    let mut settings = piston_window::WindowSettings::new("Chip8 Emulator", (64.0 * 10.0, 32.0 * 10.0));
+    let mut settings =
+        piston_window::WindowSettings::new("Chip8 Emulator", (64.0 * 10.0, 32.0 * 10.0));
     settings.set_vsync(true);
     let mut window: piston_window::PistonWindow = settings.build().unwrap();
     let mut texture_ctx = window.create_texture_context();
@@ -54,6 +58,7 @@ fn main() {
 
     let local_cpu_active = cpu_active.clone();
     let local_keyboard = keyboard.clone();
+    let local_cpu_tx = cpu_tx.clone();
     threads.push(thread::spawn(move || {
         let mut clock = Clock::new(540); // Hz
         let mut timer_clock = Clock::new(60); // Hz
@@ -65,29 +70,42 @@ fn main() {
                 if timer_clock.tick(false) {
                     cpu.tick();
                 }
+
+                if cpu.frame_buf.lock().unwrap().handle_draw() {
+                    local_cpu_tx.send(());
+                }
             }
         }
     }));
 
     let local_gpu_active = gpu_active.clone();
-    let local_cpu_buf = cpu_buf.clone();
-    let local_epx_buf = epx_buf.clone();
+    let local_cpu_buf = frame_buf_ctx.get_buffer(0);
+    let local_epx_buf = frame_buf_ctx.get_buffer(1);
     let local_gpu = gpu.clone();
+    let local_epx_tx = epx_tx.clone();
     threads.push(thread::spawn(move || {
         while *local_gpu_active.lock().unwrap() {
-            if let Ok(()) = internal_rx.recv() {
+            if let Ok(()) = cpu_rx.recv() {
                 let cpu_buf = local_cpu_buf.lock().unwrap();
                 let mut epx_buf = local_epx_buf.lock().unwrap();
-                local_gpu.lock().unwrap().process(cpu_buf.borrow(), epx_buf.borrow_mut());
-                epx_buf.request_draw();
+                local_gpu
+                    .lock()
+                    .unwrap()
+                    .process(cpu_buf.borrow(), epx_buf.borrow_mut());
+
+                if epx_buf.handle_draw() {
+                    local_epx_tx.send(());
+                }
             }
         }
     }));
 
+    let local_epx_buf = frame_buf_ctx.get_buffer(1);
     while let Some(e) = window.next() {
         if let Ok(()) = epx_rx.try_recv() {
-            let buf = epx_buf.lock().unwrap();
-            let tex_settings = piston_window::TextureSettings::new().filter(piston_window::Filter::Nearest);
+            let buf = local_epx_buf.lock().unwrap();
+            let tex_settings =
+                piston_window::TextureSettings::new().filter(piston_window::Filter::Nearest);
             texture = Some(
                 piston_window::Texture::from_memory_alpha(
                     &mut texture_ctx,
@@ -95,17 +113,16 @@ fn main() {
                     buf.width(),
                     buf.height(),
                     &tex_settings,
-                ).unwrap(),
+                )
+                .unwrap(),
             );
         }
 
         //println!("{:?}", e);
 
-        let state_to_bool = |state: ButtonState| {
-            match (state) {
-                ButtonState::Press => true,
-                ButtonState::Release => false
-            }
+        let state_to_bool = |state: ButtonState| match (state) {
+            ButtonState::Press => true,
+            ButtonState::Release => false,
         };
         match &e {
             piston_window::Event::Input(piston_window::Input::Button(args), _) => {
@@ -135,7 +152,7 @@ fn main() {
                             None
                         }
                         _ => None,
-                    }
+                    },
                     _ => None,
                 };
 
@@ -144,7 +161,7 @@ fn main() {
                     (Some(idx), ButtonState::Release) => keyboard.lock().unwrap().release_key(idx),
                     _ => {}
                 }
-            },
+            }
             _ => {}
         }
 
@@ -161,7 +178,7 @@ fn main() {
     *gpu_active.lock().unwrap() = false;
 
     // Send signal to unblock gpu thread
-    internal_tx.send(()).unwrap();
+    cpu_tx.send(());
 
     for t in threads {
         t.join().unwrap();
